@@ -1,0 +1,125 @@
+import streamlit as st
+from langchain_community.document_loaders import PyPDFLoader, UnstructuredFileLoader, TextLoader
+
+import tempfile
+import os
+
+from langchain.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
+from langchain_core.prompts import PromptTemplate
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+from langchain_groq import ChatGroq
+
+from langchain.schema import Document
+
+from langchain.vectorstores import Chroma
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+# -------------------- Page Configuration --------------------
+st.set_page_config(page_title="Smart Academic Assistant", layout="centered")
+
+# -------------------- Title --------------------
+st.title("📚 Smart Academic Assistant")
+st.write("Upload your academic documents and ask questions to get structured answers.")
+
+# -------------------- File Upload Section --------------------
+uploaded_files = st.file_uploader(
+    "Upload academic documents (PDF, DOCX, or TXT):",
+    type=["pdf", "docx", "txt"],
+    accept_multiple_files=True
+)
+
+
+
+# -------------------- Question Input --------------------
+question = st.text_input("Enter your academic question:")
+
+# -------------------- Submit Button --------------------
+if st.button("Get Answer"):
+    if not uploaded_files or not question:
+        st.warning("Please upload at least one document and enter a question.")
+    else:
+        # -------------------- PLACEHOLDER: RAG Pipeline Logic --------------------
+        # TODO:
+        # 1. Load documents using LangChain document loaders
+        docs=[]
+        for file in uploaded_files:
+
+            file_suffix = os.path.splitext(file.name)[1]  # e.g., .pdf, .txt, .docx 
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp_file:
+                tmp_file.write(file.read())
+                tmp_file_path = tmp_file.name
+            if(file.type=="application/pdf"):
+                loader=PyPDFLoader(tmp_file_path)
+                docs.extend(loader.load())
+            elif(file.type=="text/plain"):
+                loader=TextLoader(tmp_file_path)
+                docs.extend(loader.load())
+            elif(file.type=="application/vnd.openxmlformats-officedocument.wordprocessingml.document"):
+                loader=UnstructuredFileLoader(tmp_file_path)
+                docs.extend(loader.load())
+            else:
+                st.error("unsupported file type")
+                continue
+        # 2. Split documents using RecursiveCharacterTextSplitter or similar
+        splitter=RecursiveCharacterTextSplitter(
+            chunk_size=300,
+            chunk_overlap=45,
+        )
+        chunks=splitter.split_documents(docs)
+        # 3. Create embeddings and store in vector store (e.g., FAISS, Chroma)
+        embeddings=HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2')
+        vector_store=Chroma(
+            embedding_function=HuggingFaceEmbeddings(model_name='sentence-transformers/all-MiniLM-L6-v2'),
+            persist_directory='chroma_db',
+        )
+        vector_store.add_documents(chunks)
+
+        # 4. Retrieve relevant chunks based on the question
+        retriever=vector_store.as_retriever(search_kwargs={'k':3})
+        relevant_docs=retriever.invoke(question)
+        # 5. Use Groq-hosted LLM via LangChain (e.g., Mixtral, Gemma, Llama3)
+        model=ChatGroq(
+            model="Llama-3.3-70b-Versatile",
+        )
+
+        # 6. Use Output Parser to format structured response
+        class json_answer(BaseModel):
+            question: str
+            answer: str
+            source_document: str
+            confidence_score: float
+        parser=PydanticOutputParser(pydantic_object=json_answer)
+        prompt=PromptTemplate(
+            template="""{format_instructions} \n give answer to the following question in json format using only provided documents. if answer is not found in provided documents, just say you dont know." \
+            "Example output format (replace this with actual output):"
+            "response = (
+            "question": "question", 
+            "answer": "Your answer here", 
+            "source_document": "Document Name", 
+            "confidence_score": "0.93"
+                )
+            \n question= {question}, documents={relevant}""",
+            input_variables=['question','relevant'],
+            partial_variables={"format_instructions":parser.get_format_instructions()}
+        )
+        chain=prompt| model| parser
+    
+
+        result = chain.invoke({'relevant': relevant_docs, 'question': question})
+
+        st.subheader("📄 Answer:")
+
+        st.write(result)
+      
+# -------------------- Footer --------------------
+st.markdown("---")
+st.caption("Mentox Bootcamp · Final Capstone Project · Phase 1")
